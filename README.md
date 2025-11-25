@@ -9,5 +9,12 @@
    ```
    output += 'zebra on-rib-process script evpn_mh_sph\n'
    ```
-6. Place `frr-evpn-mh` in `/etc/sudoers.d/`
-7. Reboot VyOS
+6. Place `evpn.mh.sph.j2` into `/usr/share/vyos/templates/frr/`
+7. Place `vyos-evpn-sph.service` in `/run/systemd/system/`
+8. Run these commands:
+   ```
+   sudo systemctl daemon-reload
+   sudo systemctl enable vyos-evpn-sph.service
+   sudo systemctl start vyos-evpn-sph.service
+   ```
+9. Reboot VyOS
