@@ -7,146 +7,281 @@ import tempfile
 import json
 
 from vyos.utils.dict import dict_search
+from vyos.utils.dict import dict_search_args
 from vyos.utils.process import cmd
 from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
+from vyos.template import render
 
-DEBOUNCE_MS = 500
-STATE_DIR = "/run/frr/evpn-mh"
+nftables_conf = '/run/nftables_evpn_sph.conf'
 underlay_iface = ['eth1', 'eth3']
+evpn_dir = "/run/frr/evpn-mh"
 
 def log_message(message, process, level=syslog.LOG_INFO):   
     syslog.openlog(process, syslog.LOG_PID)
     syslog.syslog(level, message)    
     syslog.closelog()
 
-def atomic_write(path, content):
-    d = os.path.dirname(path)
-    fd, tmp = tempfile.mkstemp(dir=d, prefix=".evpn_", text=True)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+def index_dicts_by_key(path, dict_list, delim="."):
+    """
+    Build a dictionary keyed by a nested value from each entry.
 
-def create_token(iface, non_df):
-    os.makedirs(STATE_DIR, exist_ok=True)
-    token_path = os.path.join(STATE_DIR, f"{iface}.token")
-    token = f"{time.time_ns()}:{non_df}"
-    return token_path, token
+    Resolves a nested key for each dict in a list and reinserts it into 
+    the dict under the new key. Dicts that are missing the key will be
+    placed into an "unknown" list of dicts.
 
-def read_file(path):
+    Parameters
+    ----------
+    path : str
+        Nested key path. Path can be separated by other delimiters if 
+        the delim argument is provided. 
+        (e.g. "interface", "interface.name", or "interface--name--address").        
+    dict_list : list[dict]
+        Dictionaries to index.
+    delim : str, optional
+        Path delimiter. Defaults to ".".
+
+    Returns
+    -------
+    dict
+        Mapping of {resolved_value: dict}, optionally with "unknown": [dicts].
+    """
+    parts = path.split(delim)
+    result = {}
+    unknown_entries = []
+
+    for entry in dict_list:
+        key_value = dict_search_args(entry, *parts)
+        if key_value is None:
+            unknown_entries.append(entry)
+        else:
+            result[key_value] = entry
+
+    if unknown_entries:
+        result["unknown"] = unknown_entries
+
+    return result    
+
+def load_file_with_mtime(path):
+    try:
+        stat = os.stat(path)
+        mtime = stat.st_mtime
+    except FileNotFoundError:
+        return None, None
+
     try:
         with open(path, "r") as f:
-            return f.read().strip()
+            data = json.load(f)
     except Exception:
-        return None
+        # JSON incomplete or corrupted due to write burst
+        return None, mtime
 
-def read_token(token_path):
-    return read_file(token_path)
+    return data, mtime
 
-def is_latest_token(token_path, token):
-    return read_token(token_path) == token
 
-def state_is_unchanged(state_path, non_df):
-    existing = read_file(state_path)
-    return existing == non_df
+def get_df_status():
+    """
+    Returns:
+        dict: { ifname: "df" | "non-df" }
+        OR {} (empty) if nothing valid found
+    """
 
-def write_non_df_state(state_path, non_df):
-    atomic_write(state_path, f"{non_df}\n")
+    status = {}
 
-def check_tables(table_name):
+    for fname in os.listdir(evpn_dir):
+        if not fname.startswith("evpn_df_status_") or not fname.endswith(".json"):
+            continue
+
+        path = os.path.join(evpn_dir, fname)
+
+        data1, ts1 = load_file_with_mtime(path)
+        if data1 is None:
+            continue
+
+        time.sleep(0.5)
+
+        data2, ts2 = load_file_with_mtime(path)
+        if data2 is None or ts1 != ts2:
+            continue
+
+        ifname    = data2["interface"]
+        df_status = data2["df_status"]
+
+        if df_status in ("df", "non-df"):
+            status[ifname] = df_status
+
+    return status
+
+def nft_table_exists(table_name):
     rc, _ = rc_cmd(f"sudo nft list table {table_name}")
     if rc == 0:
         return True
     else:
         return False
 
-def delete_nft_table(table_name):
-    run(f"sudo nft delete table {table_name}")
+def is_flooding_enabled(iface):
+    bond_dict = json.loads(cmd(f"sudo bridge -d -j link show dev {iface}"))
+    bond_dict = index_dicts_by_key('ifname', bond_dict)
+    if bond_dict:
+        vals = (bond_dict[iface]["flood"], bond_dict[iface]["mcast_flood"], bond_dict[iface]["bcast_flood"])
 
-def create_netdev_table(vteps):
-    run(f"sudo nft add table netdev evpn_sph")
+        all_true  = all(vals)
+        all_false = not any(vals)
 
-    run(f"sudo nft add set netdev evpn_sph vteps '{{ type ipv4_addr; flags interval; }}'")
-    run(f"sudo nft add element netdev evpn_sph vteps {{ {', '.join(vteps)} }}")
+        if all_true:
+            return True
+        elif all_false:
+            return False
 
-    run(f"sudo nft add chain netdev evpn_sph evpn_sph_ingress '{{ type filter hook ingress devices = {{ {', '.join(underlay_iface)} }} priority 0; policy accept; }}'")
-
-    run(f"sudo nft add rule netdev evpn_sph evpn_sph_ingress ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter")
-
-def create_bridge_table():
-    run(f"sudo nft add table bridge evpn_sph")
-    run(f"sudo nft add chain bridge evpn_sph evpn_sph_forward '{{ type filter hook forward priority 0; policy accept; }}'")
-
-    run(f"sudo nft add rule bridge evpn_sph evpn_sph_forward meta mark 0x04fc867d meta pkttype multicast counter drop")
-    run(f"sudo nft add rule bridge evpn_sph evpn_sph_forward meta mark 0x04fc867d meta pkttype broadcast counter drop")
-
-def get_vteps(iface):
-    es_data = json.loads(cmd("vtysh -c 'show evpn es detail json' | jq 'map({ (.accessPort): . }) | add'"))
-    vteps = []
+def get_vteps(es_data, vteps):
     if es_data:
-        vtep_dict = dict_search(f'{iface}.vteps', es_data)
+        vtep_dict = dict_search(f'vteps', es_data)
         for vtep in vtep_dict:
-            vteps.append(dict_search('vtep', vtep))
+            vteps.add(dict_search('vtep', vtep))
         
     return vteps
 
-def change_flooding(iface, state):
+def flooding_state(iface, state):
     run(f"sudo bridge link set dev {iface} flood {state}")
     run(f"sudo bridge link set dev {iface} mcast_flood {state}")
     run(f"sudo bridge link set dev {iface} bcast_flood {state}")
 
+def get_es_data():
+    es_data = json.loads(cmd("vtysh -c 'show evpn es detail json'"))
+    es_data = index_dicts_by_key('accessPort', es_data)
+    if es_data:
+        for iface in es_data.keys():
+            if iface == 'unknown':
+                continue
+
+            if 'df' in dict_search(f'{iface}.flags', es_data):
+                es_data[iface]['df_status'] = 'df'
+            elif 'nonDF' in dict_search(f'{iface}.flags', es_data):
+                es_data[iface]['df_status'] = 'non-df'    
+            else:
+                es_data[iface]['df_status'] = 'unknown'
+
+    return es_data
+
+def update_sph_filters(es_dict):
+    def get_configured_state(vals):
+        if all(vals):
+            return 'df'
+        elif not any(vals):
+            return 'non-df'
+        else:
+            return 'unknown'
+    config_dict = {}
+    flood_dict = {}
+
+    tmp = get_es_data()
+    if tmp != es_dict:
+        es_dict = tmp
+
+    netdev_table_exists = nft_table_exists("netdev evpn_sph")
+    bridge_table_exists = nft_table_exists("bridge evpn_sph")
+
+    vteps = set()
+    update_required = False
+    is_df = set()
+    update_required = False
+
+    for iface in es_dict.keys():
+        reported_df_state = es_dict[iface]['df_status']
+        is_flooding_enabled_state = is_flooding_enabled(iface)
+
+        vals = (netdev_table_exists, bridge_table_exists, is_flooding_enabled_state)
+        configured_state = get_configured_state(vals)
+
+        if reported_df_state == configured_state:
+            continue
+        update_required = True
+        vteps = get_vteps(es_dict[iface], vteps)
+        is_df.add(reported_df_state)
+
+        if reported_df_state == 'df':
+            flood_dict[iface] = 'on'
+        else:
+            flood_dict[iface] = 'off'
+
+
+    if not update_required:
+        return
+    if 'df' in is_df:
+        config_dict['vteps'] = ', '.join(vteps)    
+    config_dict['netdev_table_exists'] = netdev_table_exists
+    config_dict['bridge_table_exists'] = bridge_table_exists
+
+    for iface in flood_dict.keys():
+        flooding_state(iface, flood_dict[iface])
+
+    render(nftables_conf, 'frr/evpn.mh.sph.j2', config_dict)     
+    rc, _ = rc_cmd('nft -c --file /run/nftables_nat.conf')
+    if rc != 0:
+        log_message(f"nftables configuration validation failed: {rc}", "frr-evpn-mh", syslog.LOG_ERR)
+        return
+    
+    rc, _ = rc_cmd(f'nft --file {nftables_conf}')
+    if rc != 0:
+        log_message(f"Failed to apply nftables configuration: {rc}", "frr-evpn-mh", syslog.LOG_ERR)
+        return
+
 def main():
-    iface = sys.argv[1] if len(sys.argv) > 1 else ""
-    non_df = sys.argv[2] if len(sys.argv) > 2 else ""
+    es_dict = get_es_data()
+    refresh_count = 0
+    first_run = True
+    update_required = False
+    while True:
+        if update_required or not es_dict:
+            es_dict = get_es_data()
 
-    token_path, token = create_token(iface, non_df)
-    atomic_write(token_path, token)
+        if not es_dict:
+            time.sleep(0.5)
+            continue
 
-    time.sleep(DEBOUNCE_MS / 1000.0)
+        bond_interfaces = es_dict.keys()
 
-    if not is_latest_token(token_path, token):
-        return 0
+        if first_run:
+            update_sph_filters(es_dict)
+            first_run = False
+            time.sleep(0.5)
+            continue
 
-    state_path = os.path.join(STATE_DIR, f"{iface}.state")
+        df_dict = get_df_status()
+        if not df_dict:
+            time.sleep(0.5)
+            continue
 
-    if state_is_unchanged(state_path, non_df):
-        return 0
+        update_required = False
+        for interface in bond_interfaces:
+            if interface not in df_dict:
+                continue
+            if es_dict[interface]['df_status'] == df_dict[interface]:
+                time.sleep(0.5)
+                refresh_count += 1
+                continue
+            else:
+                update_required = True
+                break
 
-    netdev_table_exists = check_tables('netdev evpn_sph')
-    bridge_table_exists = check_tables('bridge evpn_sph')
+        if refresh_count == 10:
+            refresh_count = 0
+            update_required = True
+            
+        if update_required:
+            update_sph_filters(es_dict)
+            refresh_count = 0
+        else:
+            time.sleep(0.5)
+            continue
 
-    vteps = get_vteps(iface)
+        time.sleep(0.5)
 
-    if not vteps:
-        return 0
-
-    if non_df == "1":
-        is_df = 'non-df'
-        if netdev_table_exists:
-            delete_nft_table("netdev evpn_sph")
-        if bridge_table_exists:
-            delete_nft_table("bridge evpn_sph")
-        change_flooding(iface, "off")
-    else:
-        is_df = 'df'
-        if not netdev_table_exists:
-            create_netdev_table(vteps)
-        if not bridge_table_exists:
-            create_bridge_table()
-        change_flooding(iface, "on")
-
-    msg = f"SPH filters for {iface} have been set as {is_df}"
-    log_message(msg, "frr-evpn-mh")
-
-    write_non_df_state(state_path, non_df)    
-
-    return 0
+        msg = f"SPH filters have been updated!"
+        log_message(msg, "frr-evpn-mh")  
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        main()
     except Exception as e:
         log_message(e, "frr-evpn-error", syslog.LOG_ERR)
-        sys.exit(1)
