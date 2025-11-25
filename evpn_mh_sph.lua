@@ -19,6 +19,7 @@ local function safe_filename(s)
 end
 
 local BASE_DIR = "/run/frr/evpn-mh"
+os.execute("mkdir -p " .. BASE_DIR)
 
 local function write_df_status(ifname, non_df)
     local filename = BASE_DIR .. "/evpn_df_status_" .. safe_filename(ifname) .. ".json"
@@ -49,3 +50,4 @@ function on_rib_process_dplane_results(ctx)
     end
     return {}
 end
+
