@@ -1,1 +1,0 @@
-frr ALL=(root) NOPASSWD: /usr/sbin/nft, /usr/sbin/bridge
