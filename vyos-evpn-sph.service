@@ -1,0 +1,21 @@
+[Unit]
+Description=EVPN DF Monitor Script
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/bin/python3 /home/vyos/test.py
+Restart=always
+RestartSec=2
+
+# Stop Python cleanly on shutdown
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+# Ensure core dumps don’t fill the system
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
