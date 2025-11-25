@@ -17,11 +17,6 @@ nftables_conf = '/run/nftables_evpn_sph.conf'
 underlay_iface = ['eth1', 'eth3']
 evpn_dir = "/run/frr/evpn-mh"
 
-def log_message(message, process, level=syslog.LOG_INFO):   
-    syslog.openlog(process, syslog.LOG_PID)
-    syslog.syslog(level, message)    
-    syslog.closelog()
-
 def index_dicts_by_key(path, dict_list, delim="."):
     """
     Build a dictionary keyed by a nested value from each entry.
@@ -136,10 +131,12 @@ def is_flooding_enabled(iface):
 def get_vteps(es_data, vteps):
     if es_data:
         vtep_dict = dict_search(f'vteps', es_data)
-        for vtep in vtep_dict:
-            vteps.add(dict_search('vtep', vtep))
-        
-    return vteps
+        if vtep_dict:
+            for vtep in vtep_dict:
+                vteps.add(dict_search('vtep', vtep))
+            
+        return vteps
+    return set()
 
 def flooding_state(iface, state):
     run(f"sudo bridge link set dev {iface} flood {state}")
@@ -147,7 +144,12 @@ def flooding_state(iface, state):
     run(f"sudo bridge link set dev {iface} bcast_flood {state}")
 
 def get_es_data():
-    es_data = json.loads(cmd("vtysh -c 'show evpn es detail json'"))
+    rc, es_data = rc_cmd("sudo vtysh -c 'show evpn es detail json'")
+    if rc != 0:
+        print(f"Error getting ES data: {es_data}")
+        return {}
+
+    es_data = json.loads(es_data)
     es_data = index_dicts_by_key('accessPort', es_data)
     if es_data:
         for iface in es_data.keys():
@@ -216,72 +218,76 @@ def update_sph_filters(es_dict):
         flooding_state(iface, flood_dict[iface])
 
     render(nftables_conf, 'frr/evpn.mh.sph.j2', config_dict)     
-    rc, _ = rc_cmd('nft -c --file /run/nftables_nat.conf')
+    rc, _ = rc_cmd('sudo nft -c --file /run/nftables_nat.conf')
     if rc != 0:
-        log_message(f"nftables configuration validation failed: {rc}", "frr-evpn-mh", syslog.LOG_ERR)
+        print(f"nftables configuration validation failed: {rc}")
         return
     
-    rc, _ = rc_cmd(f'nft --file {nftables_conf}')
+    rc, _ = rc_cmd(f'sudo nft --file {nftables_conf}')
     if rc != 0:
-        log_message(f"Failed to apply nftables configuration: {rc}", "frr-evpn-mh", syslog.LOG_ERR)
+        print(f"Failed to apply nftables configuration: {rc}")
         return
 
+    print('SPH filters have been updated!')
+
 def main():
-    es_dict = get_es_data()
-    refresh_count = 0
-    first_run = True
-    update_required = False
-    while True:
-        if update_required or not es_dict:
-            es_dict = get_es_data()
-
-        if not es_dict:
-            time.sleep(0.5)
-            continue
-
-        bond_interfaces = es_dict.keys()
-
-        if first_run:
-            update_sph_filters(es_dict)
-            first_run = False
-            time.sleep(0.5)
-            continue
-
-        df_dict = get_df_status()
-        if not df_dict:
-            time.sleep(0.5)
-            continue
-
+    try:
+        es_dict = get_es_data()
+        refresh_count = 0
+        first_run = True
         update_required = False
-        for interface in bond_interfaces:
-            if interface not in df_dict:
-                continue
-            if es_dict[interface]['df_status'] == df_dict[interface]:
+        while True:
+            if update_required or not es_dict:
+                es_dict = get_es_data()
+
+            if not es_dict:
                 time.sleep(0.5)
-                refresh_count += 1
                 continue
-            else:
+
+            bond_interfaces = es_dict.keys()
+
+            if first_run:
+                update_sph_filters(es_dict)
+                first_run = False
+                time.sleep(0.5)
+                continue
+
+            df_dict = get_df_status()
+            if not df_dict:
+                time.sleep(0.5)
+                continue
+
+            update_required = False
+            for interface in bond_interfaces:
+                if interface not in df_dict:
+                    continue
+                if es_dict[interface]['df_status'] == df_dict[interface]:
+                    time.sleep(0.5)
+                    refresh_count += 1
+                    continue
+                else:
+                    update_required = True
+                    break
+
+            if refresh_count == 10:
+                refresh_count = 0
                 update_required = True
-                break
+                
+            if update_required:
+                update_sph_filters(es_dict)
+                refresh_count = 0
+            else:
+                time.sleep(0.5)
+                continue
 
-        if refresh_count == 10:
-            refresh_count = 0
-            update_required = True
-            
-        if update_required:
-            update_sph_filters(es_dict)
-            refresh_count = 0
-        else:
             time.sleep(0.5)
-            continue
 
-        time.sleep(0.5)
-
-        msg = f"SPH filters have been updated!"
-        log_message(msg, "frr-evpn-mh")  
+    except Exception as e:
+        print("ERROR:", e)
+        raise
 
 if __name__ == "__main__":
     try:
         main()
-    except Exception as e:
-        log_message(e, "frr-evpn-error", syslog.LOG_ERR)
+    except KeyboardInterrupt:
+        pass
