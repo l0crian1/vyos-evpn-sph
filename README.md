@@ -1,2 +1,13 @@
-# vyos-evpn-sph
-Split-Horizon filtering solution for VyOS
+1. Create FRR scripts directory
+   ```
+   mkdir -p /etc/frr/scripts
+   ```
+2. Place `evpn_mh_sph.lua` script in `/etc/frr/scripts/` directory
+3. Modify `underlay_iface` towards the top of `test.py` with your underlay interfaces.
+4. Place modified `test.py` in `/home/vyos/`
+5. Add this line to `/usr/lib/python3/dist-packages/vyos/frrender.py` directly after `output = '!\n'` around line 676.
+   ```
+   output += 'zebra on-rib-process script evpn_mh_sph\n'
+   ```
+6. Place `frr-evpn-mh` in `/etc/sudoers.d/`
+7. Reboot VyOS
