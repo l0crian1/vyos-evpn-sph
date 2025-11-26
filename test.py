@@ -11,11 +11,19 @@ from vyos.utils.dict import dict_search_args
 from vyos.utils.process import cmd
 from vyos.utils.process import rc_cmd
 from vyos.utils.process import run
+from vyos.utils.misc import wait_for
 from vyos.template import render
 
 nftables_conf = '/run/nftables_evpn_sph.conf'
 underlay_iface = ['eth1', 'eth3']
 evpn_dir = "/run/frr/evpn-mh"
+
+def is_process_up(cmd):
+    rc, _ = rc_cmd(cmd)
+    if rc == 0:
+        return True
+    else:
+        return False
 
 def index_dicts_by_key(path, dict_list, delim="."):
     """
@@ -169,10 +177,8 @@ def update_sph_filters(es_dict):
     def get_configured_state(vals):
         if all(vals):
             return 'df'
-        elif not any(vals):
-            return 'non-df'
         else:
-            return 'unknown'
+            return 'non-df'
     config_dict = {}
     flood_dict = {}
 
@@ -184,8 +190,8 @@ def update_sph_filters(es_dict):
     bridge_table_exists = nft_table_exists("bridge evpn_sph")
 
     vteps = set()
-    update_required = False
     is_df = set()
+    interfaces = []
     update_required = False
 
     for iface in es_dict.keys():
@@ -195,14 +201,15 @@ def update_sph_filters(es_dict):
         vals = (netdev_table_exists, bridge_table_exists, is_flooding_enabled_state)
         configured_state = get_configured_state(vals)
 
-        if reported_df_state == configured_state:
-            continue
-        update_required = True
+        if reported_df_state != configured_state:            
+            update_required = True
+
         vteps = get_vteps(es_dict[iface], vteps)
         is_df.add(reported_df_state)
 
         if reported_df_state == 'df':
             flood_dict[iface] = 'on'
+            interfaces.append(iface)
         else:
             flood_dict[iface] = 'off'
 
@@ -211,6 +218,7 @@ def update_sph_filters(es_dict):
         return
     if 'df' in is_df:
         config_dict['vteps'] = ', '.join(vteps)    
+        config_dict['interfaces'] = interfaces
     config_dict['netdev_table_exists'] = netdev_table_exists
     config_dict['bridge_table_exists'] = bridge_table_exists
 
@@ -232,6 +240,7 @@ def update_sph_filters(es_dict):
 
 def main():
     try:
+        wait_for(is_process_up, 'sudo vtysh -c "show evpn es detail json"', interval=0.5, timeout=10)
         es_dict = get_es_data()
         refresh_count = 0
         first_run = True
@@ -269,7 +278,7 @@ def main():
                     update_required = True
                     break
 
-            if refresh_count == 10:
+            if refresh_count == 60:
                 refresh_count = 0
                 update_required = True
                 
