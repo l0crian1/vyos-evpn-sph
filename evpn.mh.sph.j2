@@ -18,15 +18,16 @@ table netdev evpn_sph {
 
         chain evpn_sph_ingress {
                 type filter hook ingress devices = { eth1, eth3 } priority filter; policy accept;
-                ip saddr @vteps udp dport 4789 meta mark set 0x00000064 counter
+                ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter
         }
 }
 
 table bridge evpn_sph {
         chain evpn_sph_forward {
                 type filter hook forward priority 0; policy accept;
-                meta mark 0x00000064 meta pkttype multicast counter drop
-                meta mark 0x00000064 meta pkttype broadcast counter drop
+{%     for iface in interfaces %}
+                oifname {{ iface }} meta mark 0x04fc867d meta pkttype { multicast, broadcast } counter drop
+{%     endfor %}
         }
 }
 {% endif %}
