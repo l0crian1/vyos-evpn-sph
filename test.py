@@ -235,8 +235,8 @@ def update_sph_filters(es_dict):
 def main():
     try:
         print("Waiting for FRR and Nftables to be ready...")
-        nft_ready = wait_for(is_process_up, 'sudo nft list tables', interval=0.5, timeout=10)
         frr_ready = wait_for(is_process_up, 'sudo vtysh -c "show evpn es detail json"', interval=0.5, timeout=10)
+        nft_ready = wait_for(is_process_up, 'sudo nft list tables', interval=0.5, timeout=10)
         print("FRR ready!") if frr_ready else print("FRR not ready!")
         print("Nftables ready!") if nft_ready else print("Nftables not ready!")
         if not all((frr_ready, nft_ready)):
