@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import time
 import json
 import signal
@@ -234,33 +235,36 @@ def update_sph_filters(es_dict):
 def main():
     try:
         print("Waiting for FRR and Nftables to be ready...")
-        wait_for(is_process_up, 'sudo vtysh -c "show evpn es detail json"', interval=0.5, timeout=10)
-        print("FRR ready!")
-        wait_for(is_process_up, 'sudo nft list tables', interval=0.5, timeout=10)
-        print("Nftables ready!")
+        nft_ready = wait_for(is_process_up, 'sudo nft list tables', interval=0.5, timeout=10)
+        frr_ready = wait_for(is_process_up, 'sudo vtysh -c "show poop"', interval=0.5, timeout=10)
+        print("FRR ready!") if frr_ready else print("FRR not ready!")
+        print("Nftables ready!") if nft_ready else print("Nftables not ready!")
+        if not all((frr_ready, nft_ready)):
+            print("FRR and/or Nftables not ready! Restarting Daemon...")
+            sys.exit(1)
         
         es_dict = get_es_data()
         refresh_count = 0
         first_run = True
         update_required = False
         while not stop_event.is_set():
-            if update_required or not es_dict:
+            if update_required or not es_dict: # If the system was just updated, or there is no ES data, get the latest data
                 es_dict = get_es_data()
 
-            if not es_dict:
+            if not es_dict: # If there is no ES data, wait and try again
                 time.sleep(0.5)
                 continue
 
             bond_interfaces = es_dict.keys()
 
-            if first_run:
+            if first_run: # If this is the first run, update the SPH filters
                 update_sph_filters(es_dict)
                 first_run = False
                 time.sleep(0.5)
                 continue
 
             df_dict = get_df_status()
-            if not df_dict:
+            if not df_dict: # If there is no DF status data, wait and try again
                 time.sleep(0.5)
                 continue
 
@@ -268,14 +272,14 @@ def main():
             for interface in bond_interfaces:
                 if interface not in df_dict:
                     continue
-                if es_dict[interface]['df_status'] == df_dict[interface]:
+                if es_dict[interface]['df_status'] == df_dict[interface]: # If the DF status is the same as the reported status, then no update is needed
                     time.sleep(0.5)
                     continue
-                else:
+                else: # If the DF status is different, then an update is needed
                     update_required = True
                     break
 
-            if refresh_count == int(refresh_timer / 1.5): # There are normally three 0.5 second waits per loop; total is 1.5 seconds
+            if refresh_count == int(refresh_timer / 1.5): # There are normally three 0.5 second waits per loop; total is 1.5 seconds; if the time has elapsed, then an update is needed
                 refresh_count = 0
                 update_required = True
 
