@@ -13,7 +13,7 @@ from vyos.utils.misc import wait_for
 from vyos.template import render
 
 nftables_conf = '/run/nftables_evpn_sph.conf'
-underlay_iface = ['eth1', 'eth3']
+underlay_iface = ['eth1']
 evpn_dir = "/run/frr/evpn-mh"
 
 stop_event = threading.Event()
@@ -168,8 +168,6 @@ def update_sph_filters(es_dict):
         else:
             configured_state_dict[interface] = 'unknown'
 
-    config_dict = {}
-
     tmp = get_es_data()
     if tmp != es_dict:
         es_dict = tmp
@@ -205,15 +203,19 @@ def update_sph_filters(es_dict):
 
         interfaces.append(iface)
 
+    print(configured_state_dict)
+
     if not update_required:
         return
-        
+
+    config_dict = {}        
     config_dict['vteps'] = ', '.join(vteps)    
     config_dict['netdev_table_exists'] = netdev_table_exists
     config_dict['bridge_table_exists'] = bridge_table_exists
     config_dict['df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['df_interfaces'])
     config_dict['non_df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['non_df_interfaces'])
     config_dict['interfaces'] = interfaces
+    config_dict['underlay_iface'] = ', '.join(underlay_iface)
 
     render(nftables_conf, 'frr/evpn.mh.sph.j2', config_dict)     
     rc, _ = rc_cmd(f'sudo nft -c --file {nftables_conf}')
@@ -262,15 +264,16 @@ def main():
                     continue
                 if es_dict[interface]['df_status'] == df_dict[interface]:
                     time.sleep(0.5)
-                    refresh_count += 1
                     continue
                 else:
                     update_required = True
                     break
 
-            if refresh_count == 60:
+            if refresh_count == 20:
                 refresh_count = 0
                 update_required = True
+
+            refresh_count += 1
                 
             if update_required:
                 update_sph_filters(es_dict)
