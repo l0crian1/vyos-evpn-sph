@@ -13,11 +13,11 @@ table netdev evpn_sph {
         set vteps {
                 type ipv4_addr
                 flags interval
-                elements = { {{ vteps }} }
+                elements = { {{ vteps | join(", ") }} }
         }
 
         chain evpn_sph_ingress {
-                type filter hook ingress devices = { {{ underlay_iface }} } priority filter; policy accept;
+                type filter hook ingress devices = { {{ underlay_iface | join(", ") }} } priority filter; policy accept;
 {%     if df_interfaces %}
                 ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter accept
 {%     endif %}
@@ -30,7 +30,7 @@ table bridge evpn_sph {
                 type ifname
                 flags interval
                 auto-merge
-                elements = { {{ df_interfaces }} }
+                elements = { {{ df_interfaces | quoted_join(", ") }} }
         }
 {% endif %}
 
@@ -39,7 +39,7 @@ table bridge evpn_sph {
                 type ifname
                 flags interval
                 auto-merge
-                elements = { {{ non_df_interfaces }} }
+                elements = { {{ non_df_interfaces | quoted_join(", ") }} }
         }
 {% endif %}
 
