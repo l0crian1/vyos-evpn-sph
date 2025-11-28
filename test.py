@@ -5,6 +5,8 @@ import time
 import syslog
 import tempfile
 import json
+import signal
+import threading
 
 from vyos.utils.dict import dict_search
 from vyos.utils.dict import dict_search_args
@@ -17,6 +19,14 @@ from vyos.template import render
 nftables_conf = '/run/nftables_evpn_sph.conf'
 underlay_iface = ['eth1', 'eth3']
 evpn_dir = "/run/frr/evpn-mh"
+
+stop_event = threading.Event()
+
+def _handle_termination_signal(signum, frame):
+    stop_event.set()
+
+signal.signal(signal.SIGTERM, _handle_termination_signal)
+signal.signal(signal.SIGINT, _handle_termination_signal)
 
 def is_process_up(cmd):
     rc, _ = rc_cmd(cmd)
@@ -115,26 +125,11 @@ def get_df_status():
 
     return status
 
-def nft_table_exists(table_name):
-    rc, _ = rc_cmd(f"sudo nft list table {table_name}")
-    if rc == 0:
-        return True
-    else:
-        return False
-
-def is_flooding_enabled(iface):
-    bond_dict = json.loads(cmd(f"sudo bridge -d -j link show dev {iface}"))
-    bond_dict = index_dicts_by_key('ifname', bond_dict)
-    if bond_dict:
-        vals = (bond_dict[iface]["flood"], bond_dict[iface]["mcast_flood"], bond_dict[iface]["bcast_flood"])
-
-        all_true  = all(vals)
-        all_false = not any(vals)
-
-        if all_true:
-            return True
-        elif all_false:
-            return False
+def get_nft_object(nft_cmd):
+    rc, output = rc_cmd(f"sudo nft list {nft_cmd}")
+    if rc != 0:
+        return None
+    return output
 
 def get_vteps(es_data, vteps):
     if es_data:
@@ -143,13 +138,8 @@ def get_vteps(es_data, vteps):
             for vtep in vtep_dict:
                 vteps.add(dict_search('vtep', vtep))
             
-        return vteps
+        return set(vteps)
     return set()
-
-def flooding_state(iface, state):
-    run(f"sudo bridge link set dev {iface} flood {state}")
-    run(f"sudo bridge link set dev {iface} mcast_flood {state}")
-    run(f"sudo bridge link set dev {iface} bcast_flood {state}")
 
 def get_es_data():
     rc, es_data = rc_cmd("sudo vtysh -c 'show evpn es detail json'")
@@ -174,11 +164,14 @@ def get_es_data():
     return es_data
 
 def update_sph_filters(es_dict):
-    def get_configured_state(vals):
-        if all(vals):
-            return 'df'
+    def get_configured_status(df_set, non_df_set, interface, configured_state_dict):
+        if df_set and interface in df_set:
+            configured_state_dict[interface] = 'df'
+        elif non_df_set and interface in non_df_set:
+            configured_state_dict[interface] = 'non-df'
         else:
-            return 'non-df'
+            configured_state_dict[interface] = 'unknown'
+
     config_dict = {}
     flood_dict = {}
 
@@ -186,47 +179,48 @@ def update_sph_filters(es_dict):
     if tmp != es_dict:
         es_dict = tmp
 
-    netdev_table_exists = nft_table_exists("netdev evpn_sph")
-    bridge_table_exists = nft_table_exists("bridge evpn_sph")
+    netdev_table_exists = bool(get_nft_object("table netdev evpn_sph"))
+    bridge_table_exists = bool(get_nft_object("table bridge evpn_sph"))
+    df_set = get_nft_object("set bridge evpn_sph df")
+    non_df_set = get_nft_object("set bridge evpn_sph non-df")
+
+    configured_state_dict = {
+        'df_interfaces': [],
+        'non_df_interfaces': []
+    }
 
     vteps = set()
-    is_df = set()
     interfaces = []
     update_required = False
+    if not all((netdev_table_exists, bridge_table_exists)):
+        update_required = True
 
     for iface in es_dict.keys():
         reported_df_state = es_dict[iface]['df_status']
-        is_flooding_enabled_state = is_flooding_enabled(iface)
-
-        vals = (netdev_table_exists, bridge_table_exists, is_flooding_enabled_state)
-        configured_state = get_configured_state(vals)
-
-        if reported_df_state != configured_state:            
-            update_required = True
+        get_configured_status(df_set, non_df_set, iface, configured_state_dict)
+        if configured_state_dict[iface] != reported_df_state:
+            update_required = True        
+        if reported_df_state == 'df':
+            configured_state_dict['df_interfaces'].append(iface)
+        elif reported_df_state == 'non-df':
+            configured_state_dict['non_df_interfaces'].append(iface)
 
         vteps = get_vteps(es_dict[iface], vteps)
-        is_df.add(reported_df_state)
 
-        if reported_df_state == 'df':
-            flood_dict[iface] = 'on'
-            interfaces.append(iface)
-        else:
-            flood_dict[iface] = 'off'
-
+        interfaces.append(iface)
 
     if not update_required:
         return
-    if 'df' in is_df:
-        config_dict['vteps'] = ', '.join(vteps)    
-        config_dict['interfaces'] = interfaces
+        
+    config_dict['vteps'] = ', '.join(vteps)    
     config_dict['netdev_table_exists'] = netdev_table_exists
     config_dict['bridge_table_exists'] = bridge_table_exists
-
-    for iface in flood_dict.keys():
-        flooding_state(iface, flood_dict[iface])
+    config_dict['df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['df_interfaces'])
+    config_dict['non_df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['non_df_interfaces'])
+    config_dict['interfaces'] = interfaces
 
     render(nftables_conf, 'frr/evpn.mh.sph.j2', config_dict)     
-    rc, _ = rc_cmd('sudo nft -c --file /run/nftables_nat.conf')
+    rc, _ = rc_cmd(f'sudo nft -c --file {nftables_conf}')
     if rc != 0:
         print(f"nftables configuration validation failed: {rc}")
         return
@@ -245,7 +239,7 @@ def main():
         refresh_count = 0
         first_run = True
         update_required = False
-        while True:
+        while not stop_event.is_set():
             if update_required or not es_dict:
                 es_dict = get_es_data()
 
@@ -285,9 +279,6 @@ def main():
             if update_required:
                 update_sph_filters(es_dict)
                 refresh_count = 0
-            else:
-                time.sleep(0.5)
-                continue
 
             time.sleep(0.5)
 
