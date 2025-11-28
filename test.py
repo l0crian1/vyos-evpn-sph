@@ -209,13 +209,13 @@ def update_sph_filters(es_dict):
         return
 
     config_dict = {}        
-    config_dict['vteps'] = ', '.join(vteps)    
+    config_dict['vteps'] = vteps    
     config_dict['netdev_table_exists'] = netdev_table_exists
     config_dict['bridge_table_exists'] = bridge_table_exists
-    config_dict['df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['df_interfaces'])
-    config_dict['non_df_interfaces'] = ', '.join(f'"{x}"' for x in configured_state_dict['non_df_interfaces'])
+    config_dict['df_interfaces'] = configured_state_dict['df_interfaces']
+    config_dict['non_df_interfaces'] = configured_state_dict['non_df_interfaces']
     config_dict['interfaces'] = interfaces
-    config_dict['underlay_iface'] = ', '.join(underlay_iface)
+    config_dict['underlay_iface'] = underlay_iface
 
     render(nftables_conf, 'frr/evpn.mh.sph.j2', config_dict)     
     rc, _ = rc_cmd(f'sudo nft -c --file {nftables_conf}')
@@ -232,7 +232,12 @@ def update_sph_filters(es_dict):
 
 def main():
     try:
+        print("Waiting for FRR and Nftables to be ready...")
         wait_for(is_process_up, 'sudo vtysh -c "show evpn es detail json"', interval=0.5, timeout=10)
+        print("FRR ready!")
+        wait_for(is_process_up, 'sudo nft list tables', interval=0.5, timeout=10)
+        print("Nftables ready!")
+        
         es_dict = get_es_data()
         refresh_count = 0
         first_run = True
