@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 import os
-import sys
 import time
-import syslog
-import tempfile
 import json
 import signal
 import threading
@@ -12,7 +9,6 @@ from vyos.utils.dict import dict_search
 from vyos.utils.dict import dict_search_args
 from vyos.utils.process import cmd
 from vyos.utils.process import rc_cmd
-from vyos.utils.process import run
 from vyos.utils.misc import wait_for
 from vyos.template import render
 
@@ -173,7 +169,6 @@ def update_sph_filters(es_dict):
             configured_state_dict[interface] = 'unknown'
 
     config_dict = {}
-    flood_dict = {}
 
     tmp = get_es_data()
     if tmp != es_dict:
@@ -181,8 +176,8 @@ def update_sph_filters(es_dict):
 
     netdev_table_exists = bool(get_nft_object("table netdev evpn_sph"))
     bridge_table_exists = bool(get_nft_object("table bridge evpn_sph"))
-    df_set = get_nft_object("set bridge evpn_sph df")
-    non_df_set = get_nft_object("set bridge evpn_sph non-df")
+    df_set = get_nft_object("set bridge evpn_sph df_bonds")
+    non_df_set = get_nft_object("set bridge evpn_sph non_df_bonds")
 
     configured_state_dict = {
         'df_interfaces': [],
@@ -198,6 +193,7 @@ def update_sph_filters(es_dict):
     for iface in es_dict.keys():
         reported_df_state = es_dict[iface]['df_status']
         get_configured_status(df_set, non_df_set, iface, configured_state_dict)
+        
         if configured_state_dict[iface] != reported_df_state:
             update_required = True        
         if reported_df_state == 'df':
