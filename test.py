@@ -15,6 +15,7 @@ from vyos.template import render
 nftables_conf = '/run/nftables_evpn_sph.conf'
 underlay_iface = ['eth1']
 evpn_dir = "/run/frr/evpn-mh"
+refresh_timer = 30 # seconds
 
 stop_event = threading.Event()
 
@@ -274,7 +275,7 @@ def main():
                     update_required = True
                     break
 
-            if refresh_count == 20:
+            if refresh_count == int(refresh_timer / 1.5): # There are normally three 0.5 second waits per loop; total is 1.5 seconds
                 refresh_count = 0
                 update_required = True
 
