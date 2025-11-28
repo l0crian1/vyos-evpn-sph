@@ -14,7 +14,6 @@ from vyos.utils.misc import wait_for
 from vyos.template import render
 
 nftables_conf = '/run/nftables_evpn_sph.conf'
-underlay_iface = ['eth1']
 evpn_dir = "/run/frr/evpn-mh"
 refresh_timer = 30 # seconds
 
@@ -161,6 +160,17 @@ def get_es_data():
 
     return es_data
 
+def get_underlay_iface():
+    bgp_peers = json.loads(cmd("sudo vtysh -c 'show bgp l2vpn evpn summary established json'"))
+    bgp_peers = dict_search('peers', bgp_peers).keys()
+    underlay_iface = set()
+    for peer in bgp_peers:
+        peer_route = json.loads(cmd(f"sudo vtysh -c 'show ip route {peer} json'"))
+        peer_route = next(iter(peer_route.values()))[0]
+        for interface in dict_search('nexthops', peer_route):
+            underlay_iface.add(dict_search('interfaceName', interface))
+    return list(underlay_iface)
+
 def update_sph_filters(es_dict):
     def get_configured_status(df_set, non_df_set, interface, configured_state_dict):
         if df_set and interface in df_set:
@@ -209,6 +219,8 @@ def update_sph_filters(es_dict):
 
     if not update_required:
         return
+
+    underlay_iface = get_underlay_iface()
 
     config_dict = {}        
     config_dict['vteps'] = vteps    
