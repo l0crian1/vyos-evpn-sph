@@ -18,16 +18,39 @@ table netdev evpn_sph {
 
         chain evpn_sph_ingress {
                 type filter hook ingress devices = { eth1, eth3 } priority filter; policy accept;
-                ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter
+{%     if df_interfaces %}
+                ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter accept
+{%     endif %}
         }
 }
 
 table bridge evpn_sph {
+{% if df_interfaces %}
+        set df_bonds {
+                type ifname
+                flags interval
+                auto-merge
+                elements = { {{ df_interfaces }} }
+        }
+{% endif %}
+
+{% if non_df_interfaces %}
+        set non_df_bonds {
+                type ifname
+                flags interval
+                auto-merge
+                elements = { {{ non_df_interfaces }} }
+        }
+{% endif %}
+
         chain evpn_sph_forward {
                 type filter hook forward priority 0; policy accept;
-{%     for iface in interfaces %}
-                oifname {{ iface }} meta mark 0x04fc867d meta pkttype { multicast, broadcast } counter drop
-{%     endfor %}
+{%     if df_interfaces %}
+                oifname @df_bonds meta mark 0x04fc867d meta pkttype { multicast, broadcast } counter drop
+{%     endif %}
+{%     if non_df_interfaces %}
+                iifname "vxlan*" oifname @non_df_bonds meta pkttype { multicast, broadcast } counter drop
+{%     endif %}
         }
 }
 {% endif %}
