@@ -17,7 +17,7 @@ table netdev evpn_sph {
         }
 
         chain evpn_sph_ingress {
-                type filter hook ingress devices = { eth1, eth3 } priority filter; policy accept;
+                type filter hook ingress devices = { {{ underlay_iface }} } priority filter; policy accept;
 {%     if df_interfaces %}
                 ip saddr @vteps udp dport 4789 meta mark set 0x04fc867d counter accept
 {%     endif %}
